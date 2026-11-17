@@ -1,0 +1,411 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<meta name="theme-color" content="#0b0f17">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>Rádio São Luiz — Câmera Ao Vivo</title>
+<link rel="icon" href="data:,">
+<style>
+  :root { --bg:#0b0f17; --panel:#141a26; --line:#252e40; --txt:#e8edf6; --mut:#8a96ad; --red:#e5333b; --ok:#2ecc71; --warn:#f5b041; }
+  * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  html,body { margin:0; height:100%; background:var(--bg); color:var(--txt); font:15px/1.4 system-ui,-apple-system,Segoe UI,Roboto,sans-serif; }
+  .wrap { display:flex; flex-direction:column; height:100%; padding:env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left); }
+  header { display:flex; align-items:center; gap:10px; padding:10px 14px; }
+  header h1 { font-size:16px; margin:0; font-weight:700; letter-spacing:.3px; }
+  .badge { margin-left:auto; padding:4px 10px; border-radius:99px; font-size:12px; font-weight:700; background:var(--line); color:var(--mut); }
+  .badge.live { background:var(--red); color:#fff; animation:pulse 1.6s infinite; }
+  .badge.wait { background:#3a3120; color:var(--warn); }
+  @keyframes pulse { 50% { opacity:.65 } }
+  .stage { position:relative; flex:1; min-height:0; background:#000; }
+  video { width:100%; height:100%; object-fit:contain; background:#000; }
+  video.mirror { transform:scaleX(-1); }
+  .stats { position:absolute; left:8px; top:8px; background:rgba(0,0,0,.6); padding:6px 9px; border-radius:8px; font:12px/1.45 ui-monospace,Menlo,monospace; white-space:pre; pointer-events:none; }
+  .meter { position:absolute; right:8px; top:8px; bottom:8px; width:8px; background:rgba(255,255,255,.12); border-radius:4px; overflow:hidden; }
+  .meter i { position:absolute; bottom:0; left:0; right:0; height:0; background:linear-gradient(to top,var(--ok),var(--warn) 75%,var(--red)); transition:height .08s; }
+  .panel { background:var(--panel); border-top:1px solid var(--line); padding:12px 14px 14px; display:grid; gap:10px; }
+  .row { display:grid; grid-template-columns:1fr 1fr; gap:8px; }
+  label { font-size:12px; color:var(--mut); display:grid; gap:4px; }
+  select,input { width:100%; background:var(--bg); color:var(--txt); border:1px solid var(--line); border-radius:10px; padding:10px; font-size:15px; }
+  .btns { display:grid; grid-template-columns:2fr 1fr 1fr; gap:8px; }
+  button { border:0; border-radius:12px; padding:14px 10px; font-size:15px; font-weight:700; color:#fff; background:var(--line); }
+  button.go { background:var(--red); }
+  button.stop { background:#444c5e; }
+  button:disabled { opacity:.45; }
+  .msg { font-size:12.5px; color:var(--mut); min-height:1.2em; }
+  .msg.err { color:#ff7b7b; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>📻 Rádio São Luiz · Câmera</h1>
+    <span id="badge" class="badge">PARADO</span>
+  </header>
+
+  <div class="stage">
+    <video id="preview" playsinline autoplay muted></video>
+    <div id="stats" class="stats" hidden></div>
+    <div class="meter"><i id="vu"></i></div>
+  </div>
+
+  <div class="panel">
+    <div class="row">
+      <label>Sala<input id="room" value="estudio" autocomplete="off"></label>
+      <label>Chave<input id="key" type="password" autocomplete="off" placeholder="chave da transmissão"></label>
+    </div>
+    <div class="row">
+      <label>Qualidade
+        <select id="preset">
+          <option value="eco">Econômico · 480p · ~0,7 Mbps</option>
+          <option value="bal" selected>Equilibrado · 720p · ~1,5 Mbps</option>
+          <option value="hd">Full HD · 1080p · ~3 Mbps</option>
+        </select>
+      </label>
+      <label>Codec
+        <select id="codec">
+          <option value="auto" selected>Automático</option>
+          <option value="video/VP9">VP9 (menos dados)</option>
+          <option value="video/H264">H.264 (menos bateria)</option>
+          <option value="video/AV1">AV1 (mínimo de dados)</option>
+        </select>
+      </label>
+    </div>
+    <div class="row">
+      <label>Câmera
+        <select id="facing">
+          <option value="environment" selected>Traseira</option>
+          <option value="user">Frontal</option>
+        </select>
+      </label>
+      <label>Redução de ruído
+        <select id="ns">
+          <option value="0" selected>Desligada (estúdio)</option>
+          <option value="1">Ligada (externa)</option>
+        </select>
+      </label>
+    </div>
+    <div class="btns">
+      <button id="start" class="go">● INICIAR</button>
+      <button id="mute">🎙️ Mic</button>
+      <button id="flip">🔄</button>
+    </div>
+    <div id="msg" class="msg">Dica: deixe o celular na tomada e no Wi-Fi 5 GHz quando possível.</div>
+  </div>
+</div>
+
+<script src="/common.js"></script>
+<script>
+const PRESETS = {
+  eco: { w: 854,  h: 480,  fps: 30, kbps: 700  },
+  bal: { w: 1280, h: 720,  fps: 30, kbps: 1500 },
+  hd:  { w: 1920, h: 1080, fps: 30, kbps: 3000 },
+};
+const AUDIO_KBPS = 96; // Opus 96 kbps: voz e trilha com qualidade de rádio
+
+const $ = (id) => document.getElementById(id);
+const qs = new URLSearchParams(location.search);
+$('room').value = qs.get('room') || localStorage.getItem('rsl_room') || 'estudio';
+$('key').value  = qs.get('key')  || localStorage.getItem('rsl_key')  || '';
+if (qs.get('preset')) $('preset').value = qs.get('preset');
+
+let stream, pc, sig, ice, wakeLock, videoSender, audioSender, statsTimer, chosenCodec;
+let running = false, micOn = true, restartTimer;
+
+function msg(t, err) { $('msg').textContent = t; $('msg').className = 'msg' + (err ? ' err' : ''); }
+function badge(state) {
+  const b = $('badge');
+  b.className = 'badge' + (state === 'live' ? ' live' : state === 'wait' ? ' wait' : '');
+  b.textContent = { live: '● AO VIVO', wait: 'AGUARDANDO OBS', idle: 'PARADO', reconnect: 'RECONECTANDO' }[state];
+  if (state === 'reconnect') b.className = 'badge wait';
+}
+
+/* ---------- Captura ---------- */
+async function openMedia() {
+  const p = PRESETS[$('preset').value];
+  const ns = $('ns').value === '1';
+  const s = await navigator.mediaDevices.getUserMedia({
+    video: {
+      facingMode: { ideal: $('facing').value },
+      width: { ideal: p.w }, height: { ideal: p.h },
+      frameRate: { ideal: p.fps, max: p.fps },
+    },
+    audio: {
+      echoCancellation: false,       // não há retorno de áudio no celular
+      autoGainControl: false,        // o operador controla o ganho no OBS/mesa
+      noiseSuppression: ns,
+      channelCount: 1, sampleRate: 48000,
+    },
+  });
+  const v = s.getVideoTracks()[0];
+  if (v) v.contentHint = 'motion';   // prioriza fluidez (30 fps) em rede ruim
+  const a = s.getAudioTracks()[0];
+  if (a) a.contentHint = 'speech';
+  return s;
+}
+
+function showPreview() {
+  $('preview').srcObject = stream;
+  $('preview').classList.toggle('mirror', $('facing').value === 'user');
+  startVu();
+}
+
+/* ---------- Escolha de codec ---------- */
+async function pickCodec() {
+  const want = $('codec').value;
+  const caps = RTCRtpSender.getCapabilities('video')?.codecs || [];
+  const has = (mime) => caps.some((c) => c.mimeType.toLowerCase() === mime.toLowerCase());
+  if (want !== 'auto') return has(want) ? want : 'video/H264';
+  // Automático: VP9 quando o aparelho codifica com eficiência (hardware), senão H.264
+  const p = PRESETS[$('preset').value];
+  if (has('video/VP9') && navigator.mediaCapabilities?.encodingInfo) {
+    try {
+      const info = await navigator.mediaCapabilities.encodingInfo({
+        type: 'webrtc',
+        video: { contentType: 'video/VP9', width: p.w, height: p.h, bitrate: p.kbps * 1000, framerate: p.fps },
+      });
+      if (info.supported && info.powerEfficient) return 'video/VP9';
+    } catch {}
+  }
+  return has('video/H264') ? 'video/H264' : 'video/VP8';
+}
+
+function orderCodecs(kind, preferred) {
+  const caps = RTCRtpSender.getCapabilities(kind)?.codecs || [];
+  const first = caps.filter((c) => c.mimeType.toLowerCase() === preferred.toLowerCase());
+  // H.264: prefere perfil compatível (packetization-mode=1)
+  first.sort((a, b) => /packetization-mode=1/.test(b.sdpFmtpLine || '') - /packetization-mode=1/.test(a.sdpFmtpLine || ''));
+  return [...first, ...caps.filter((c) => !first.includes(c))];
+}
+
+/* ---------- WebRTC ---------- */
+async function createPeer() {
+  closePeer();
+  const p = PRESETS[$('preset').value];
+  const conn = new RTCPeerConnection({ ...ice, bundlePolicy: 'max-bundle', rtcpMuxPolicy: 'require' });
+  pc = conn;
+  conn.sid = Math.random().toString(36).slice(2);
+
+  // Áudio e vídeo no MESMO MediaStream → o WebRTC sincroniza os dois (lip-sync)
+  const vt = pc.addTransceiver(stream.getVideoTracks()[0], {
+    direction: 'sendonly', streams: [stream],
+    sendEncodings: [{ maxBitrate: p.kbps * 1000, maxFramerate: p.fps, priority: 'high', networkPriority: 'high' }],
+  });
+  const at = pc.addTransceiver(stream.getAudioTracks()[0], {
+    direction: 'sendonly', streams: [stream],
+    sendEncodings: [{ maxBitrate: AUDIO_KBPS * 1000, priority: 'high', networkPriority: 'high' }],
+  });
+  videoSender = vt.sender; audioSender = at.sender;
+
+  chosenCodec = await pickCodec();
+  if (pc !== conn) return; // outra negociação começou enquanto esperávamos
+  try { vt.setCodecPreferences(orderCodecs('video', chosenCodec)); } catch (e) { console.warn(e); }
+  try { at.setCodecPreferences(orderCodecs('audio', 'audio/opus')); } catch (e) { console.warn(e); }
+  await applyParams();
+  if (pc !== conn) return;
+
+  pc.onicecandidate = (e) => e.candidate && sig.send({ type: 'candidate', sid: conn.sid, candidate: e.candidate });
+  pc.onconnectionstatechange = () => {
+    const s = pc?.connectionState;
+    if (s === 'connected') { badge('live'); msg(`No ar · codec ${chosenCodec.split('/')[1]}`); clearTimeout(restartTimer); }
+    if (s === 'disconnected') { badge('reconnect'); restartTimer = setTimeout(() => iceRestart(), 2500); }
+    if (s === 'failed') { badge('reconnect'); iceRestart(); }
+  };
+  await negotiate();
+}
+
+async function negotiate(iceRestartFlag = false) {
+  if (!pc) return;
+  const offer = await pc.createOffer({ iceRestart: iceRestartFlag });
+  await pc.setLocalDescription(offer);
+  sig.send({ type: 'offer', sid: pc.sid, sdp: pc.localDescription.sdp });
+}
+
+async function iceRestart() {
+  if (!pc || !running) return;
+  msg('Rede instável — reconectando sem derrubar a transmissão…');
+  try { await negotiate(true); } catch { createPeer(); }
+}
+
+async function applyParams() {
+  if (!videoSender) return;
+  const p = PRESETS[$('preset').value];
+  const params = videoSender.getParameters();
+  if (!params.encodings?.length) params.encodings = [{}];
+  params.encodings[0].maxBitrate = p.kbps * 1000;
+  params.encodings[0].maxFramerate = p.fps;
+  params.degradationPreference = 'maintain-framerate';
+  try { await videoSender.setParameters(params); }
+  catch { delete params.degradationPreference; try { await videoSender.setParameters(params); } catch (e) { console.warn(e); } }
+}
+
+function closePeer() {
+  if (pc) { pc.onconnectionstatechange = null; pc.close(); pc = null; }
+  videoSender = audioSender = null;
+}
+
+const pending = [];
+async function onSignal(m) {
+  if (m.type === 'joined') badge('wait');
+  if (m.type === 'peer-ready' || m.type === 'request-restart') { if (running) createPeer(); }
+  if (m.type === 'peer-left') { closePeer(); badge('wait'); msg('OBS desconectado — aguardando…'); }
+  if (m.type === 'answer' && pc) {
+    const p = PRESETS[$('preset').value];
+    await pc.setRemoteDescription({ type: 'answer', sdp: tuneSdp(m.sdp, { audioKbps: AUDIO_KBPS, videoKbps: p.kbps }) });
+    while (pending.length) await pc.addIceCandidate(pending.shift()).catch(() => {});
+  }
+  if (m.type === 'candidate' && pc) {
+    if (pc.remoteDescription) await pc.addIceCandidate(m.candidate).catch(() => {});
+    else pending.push(m.candidate);
+  }
+}
+
+/* ---------- Estatísticas ---------- */
+let last = null;
+async function readStats() {
+  if (!pc || !videoSender) { $('stats').hidden = true; return; }
+  const r = await pc.getStats();
+  let out = null, remote = null, pair = null, aout = null;
+  r.forEach((s) => {
+    if (s.type === 'outbound-rtp' && s.kind === 'video') out = s;
+    if (s.type === 'outbound-rtp' && s.kind === 'audio') aout = s;
+    if (s.type === 'remote-inbound-rtp' && s.kind === 'video') remote = s;
+    if (s.type === 'candidate-pair' && s.nominated && s.state === 'succeeded') pair = s;
+  });
+  if (!out) return;
+  const now = out.timestamp;
+  const bytes = out.bytesSent + (aout?.bytesSent || 0);
+  let rate = 0;
+  if (last) rate = ((bytes - last.bytes) * 8) / ((now - last.t) / 1000);
+  last = { bytes, t: now };
+  const rtt = pair?.currentRoundTripTime != null ? Math.round(pair.currentRoundTripTime * 1000) + ' ms' : '—';
+  const loss = remote?.fractionLost != null ? (remote.fractionLost * 100).toFixed(1) + '%' : '—';
+  const lim = out.qualityLimitationReason && out.qualityLimitationReason !== 'none' ? `\nlimite: ${out.qualityLimitationReason}` : '';
+  $('stats').textContent =
+    `${out.frameWidth || '?'}×${out.frameHeight || '?'} @ ${Math.round(out.framesPerSecond || 0)} fps\n` +
+    `envio: ${fmtKbps(rate)}  ·  ${chosenCodec.split('/')[1]}\n` +
+    `ping: ${rtt}  ·  perda: ${loss}${lim}`;
+  $('stats').hidden = false;
+}
+
+/* ---------- VU de áudio ---------- */
+let actx, analyser, vuRaf;
+function startVu() {
+  cancelAnimationFrame(vuRaf);
+  try {
+    actx = actx || new (window.AudioContext || window.webkitAudioContext)();
+    actx.resume();
+    analyser = actx.createAnalyser(); analyser.fftSize = 512;
+    actx.createMediaStreamSource(stream).connect(analyser);
+    const buf = new Float32Array(analyser.fftSize);
+    const loop = () => {
+      analyser.getFloatTimeDomainData(buf);
+      let peak = 0; for (const x of buf) peak = Math.max(peak, Math.abs(x));
+      const db = 20 * Math.log10(peak || 1e-6);
+      $('vu').style.height = Math.max(0, Math.min(100, (db + 60) / 60 * 100)) + '%';
+      vuRaf = requestAnimationFrame(loop);
+    };
+    loop();
+  } catch {}
+}
+
+/* ---------- Tela sempre ligada ---------- */
+async function keepAwake() {
+  try { wakeLock = await navigator.wakeLock?.request('screen'); } catch {}
+}
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible' && running) keepAwake();
+  if (document.visibilityState === 'hidden' && running) msg('⚠️ Mantenha esta tela aberta: em segundo plano o celular desliga a câmera.', true);
+});
+
+/* ---------- Controles ---------- */
+$('start').onclick = async () => {
+  if (running) return stop();
+  if (!$('key').value) return msg('Informe a chave da transmissão.', true);
+  if (!window.isSecureContext) return msg('A câmera só funciona em HTTPS. Abra o link https:// do servidor.', true);
+  localStorage.setItem('rsl_room', $('room').value);
+  localStorage.setItem('rsl_key', $('key').value);
+  try {
+    msg('Abrindo câmera e microfone…');
+    stream = await openMedia();
+    showPreview();
+    ice = await getIceConfig();
+    running = true;
+    $('start').textContent = '■ PARAR'; $('start').className = 'stop';
+    keepAwake();
+    badge('wait'); msg('Aguardando o OBS conectar…');
+    sig = new Signaling({
+      room: $('room').value, key: $('key').value, role: 'camera',
+      onMessage: onSignal,
+      onStatus: (s) => {
+        if (s === 'unauthorized') { msg('Chave incorreta.', true); stop(); }
+        if (s === 'offline') { msg('Sem conexão com o servidor — tentando de novo…', true); }
+        if (s === 'replaced') { msg('Outra câmera assumiu esta sala.', true); stop(); }
+      },
+    });
+    statsTimer = setInterval(readStats, 1000);
+  } catch (e) {
+    console.error(e);
+    msg('Não foi possível abrir a câmera: ' + (e.message || e.name), true);
+    stop();
+  }
+};
+
+function stop() {
+  running = false;
+  clearInterval(statsTimer); cancelAnimationFrame(vuRaf);
+  closePeer(); sig?.close(); sig = null;
+  stream?.getTracks().forEach((t) => t.stop()); stream = null;
+  $('preview').srcObject = null; $('stats').hidden = true; $('vu').style.height = '0';
+  wakeLock?.release?.(); wakeLock = null;
+  $('start').textContent = '● INICIAR'; $('start').className = 'go';
+  badge('idle');
+}
+
+$('mute').onclick = () => {
+  micOn = !micOn;
+  stream?.getAudioTracks().forEach((t) => (t.enabled = micOn));
+  $('mute').textContent = micOn ? '🎙️ Mic' : '🔇 Mudo';
+  $('mute').style.background = micOn ? '' : '#7a2328';
+};
+
+// Troca de câmera sem renegociar (sem cair a transmissão)
+async function swapVideo() {
+  if (!stream) return;
+  const p = PRESETS[$('preset').value];
+  const old = stream.getVideoTracks()[0];
+  old?.stop();
+  const ns = await navigator.mediaDevices.getUserMedia({
+    video: { facingMode: { ideal: $('facing').value }, width: { ideal: p.w }, height: { ideal: p.h }, frameRate: { ideal: p.fps, max: p.fps } },
+  });
+  const nt = ns.getVideoTracks()[0]; nt.contentHint = 'motion';
+  if (old) stream.removeTrack(old);
+  stream.addTrack(nt);
+  await videoSender?.replaceTrack(nt);
+  $('preview').classList.toggle('mirror', $('facing').value === 'user');
+}
+$('flip').onclick = async () => {
+  $('facing').value = $('facing').value === 'user' ? 'environment' : 'user';
+  try { await swapVideo(); } catch (e) { msg('Falha ao trocar câmera: ' + e.message, true); }
+};
+$('facing').onchange = () => swapVideo().catch((e) => msg(e.message, true));
+
+// Troca de qualidade ao vivo
+$('preset').onchange = async () => {
+  if (!stream) return;
+  const p = PRESETS[$('preset').value];
+  try {
+    await stream.getVideoTracks()[0].applyConstraints({ width: { ideal: p.w }, height: { ideal: p.h }, frameRate: { ideal: p.fps, max: p.fps } });
+    await applyParams();
+    msg(`Qualidade alterada para ${$('preset').selectedOptions[0].text}`);
+  } catch (e) { msg(e.message, true); }
+};
+$('codec').onchange = () => { if (running && pc) createPeer(); };
+$('ns').onchange = async () => {
+  const t = stream?.getAudioTracks()[0];
+  if (t) await t.applyConstraints({ noiseSuppression: $('ns').value === '1', echoCancellation: false, autoGainControl: false }).catch(() => {});
+};
+</script>
+</body>
+</html>

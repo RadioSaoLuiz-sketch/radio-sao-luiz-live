@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<title>Rádio São Luiz — Receptor OBS</title>
+<link rel="icon" href="data:,">
+<style>
+  html,body { margin:0; width:100%; height:100%; background:transparent; overflow:hidden; }
+  body.solid { background:#000; }
+  video { position:fixed; inset:0; width:100%; height:100%; object-fit:contain; background:transparent; }
+  body.fill video { object-fit:cover; }
+  #info { position:fixed; left:12px; bottom:12px; font:13px/1.45 ui-monospace,Menlo,monospace; color:#fff;
+          background:rgba(0,0,0,.6); padding:6px 10px; border-radius:6px; white-space:pre; }
+  #wait { position:fixed; inset:0; display:flex; align-items:center; justify-content:center; flex-direction:column; gap:8px;
+          font:600 28px system-ui,sans-serif; color:#fff; text-shadow:0 2px 8px #000; }
+  #wait small { font-size:16px; font-weight:400; opacity:.8; }
+  #unmute { position:fixed; right:12px; top:12px; padding:10px 14px; font:600 14px system-ui; border:0; border-radius:8px; background:#e5333b; color:#fff; cursor:pointer; }
+</style>
+</head>
+<body>
+<video id="v" playsinline autoplay></video>
+<div id="wait">📻 Rádio São Luiz<small id="waitTxt">Aguardando câmera…</small></div>
+<div id="info" hidden></div>
+<button id="unmute" hidden>🔊 Ativar som</button>
+
+<script src="/common.js"></script>
+<script>
+/*
+  Parâmetros de URL:
+    key=CHAVE        (obrigatório) chave da transmissão
+    room=estudio     sala (padrão: estudio)
+    buffer=0         buffer de recepção em ms (0 = mínimo atraso; 150–300 = mais estável em 4G ruim)
+    debug=1          mostra estatísticas na tela
+    fill=1           preenche a tela (corta bordas) em vez de mostrar inteiro
+    bg=black         fundo preto em vez de transparente
+    idle=0           esconde o letreiro "Aguardando câmera"
+*/
+const qs = new URLSearchParams(location.search);
+const room = qs.get('room') || 'estudio';
+const key = qs.get('key') || '';
+const bufferMs = Math.max(0, Number(qs.get('buffer') || 0));
+const debug = qs.get('debug') === '1';
+if (qs.get('fill') === '1') document.body.classList.add('fill');
+if (qs.get('bg') === 'black') document.body.classList.add('solid');
+if (qs.get('idle') === '0') document.getElementById('wait').style.display = 'none';
+
+const v = document.getElementById('v');
+const wait = document.getElementById('wait');
+const waitTxt = document.getElementById('waitTxt');
+const info = document.getElementById('info');
+let pc, sig, ice, watchdog;
+const pending = [];
+
+function showWait(t) { waitTxt.textContent = t; if (qs.get('idle') !== '0') wait.style.display = 'flex'; }
+
+function lowLatency(receiver) {
+  // Mantém o buffer de jitter no mínimo (ou no valor pedido) — áudio e vídeo ajustados juntos
+  try { if ('jitterBufferTarget' in receiver) receiver.jitterBufferTarget = bufferMs; } catch {}
+  try { if ('playoutDelayHint' in receiver) receiver.playoutDelayHint = bufferMs / 1000; } catch {}
+}
+
+let currentSid = null;
+async function onOffer(sdp, sid) {
+  if (pc && sid === currentSid && pc.remoteDescription) {
+    // Reoferta (ICE restart) na mesma conexão — sem tela preta
+    await pc.setRemoteDescription({ type: 'offer', sdp });
+  } else {
+    closePeer();
+    currentSid = sid;
+    pc = new RTCPeerConnection({ ...ice, bundlePolicy: 'max-bundle', rtcpMuxPolicy: 'require' });
+    pc.onicecandidate = (e) => e.candidate && sig.send({ type: 'candidate', candidate: e.candidate });
+    pc.ontrack = (e) => {
+      lowLatency(e.receiver);
+      const stream = e.streams[0] || new MediaStream([e.track]);
+      if (v.srcObject !== stream) v.srcObject = stream;
+      play();
+    };
+    pc.onconnectionstatechange = () => {
+      const s = pc?.connectionState;
+      if (s === 'connected') wait.style.display = 'none';
+      if (s === 'failed') { showWait('Reconectando…'); sig.send({ type: 'request-restart' }); }
+    };
+    await pc.setRemoteDescription({ type: 'offer', sdp });
+  }
+  pc.getReceivers().forEach(lowLatency);
+  const answer = await pc.createAnswer();
+  await pc.setLocalDescription(answer);
+  sig.send({ type: 'answer', sdp: pc.localDescription.sdp });
+  while (pending.length) await pc.addIceCandidate(pending.shift()).catch(() => {});
+}
+
+function closePeer() {
+  if (pc) { pc.ontrack = pc.onconnectionstatechange = null; pc.close(); pc = null; }
+  pending.length = 0;
+}
+
+function play() {
+  v.muted = false;
+  v.play().catch(() => {
+    // Navegador comum bloqueia som automático; no OBS isso não acontece
+    v.muted = true; v.play().catch(() => {});
+    const b = document.getElementById('unmute');
+    b.hidden = false;
+    b.onclick = () => { v.muted = false; v.play(); b.hidden = true; };
+  });
+}
+
+// Se o vídeo "congelar" por 6 s com conexão aberta, pede reconexão
+let lastFrames = 0, frozenFor = 0;
+async function health() {
+  if (!pc || pc.connectionState !== 'connected') return;
+  const stats = await pc.getStats();
+  let vin, ain;
+  stats.forEach((s) => {
+    if (s.type === 'inbound-rtp' && s.kind === 'video') vin = s;
+    if (s.type === 'inbound-rtp' && s.kind === 'audio') ain = s;
+  });
+  if (!vin) return;
+  frozenFor = vin.framesDecoded === lastFrames ? frozenFor + 1 : 0;
+  lastFrames = vin.framesDecoded;
+  if (frozenFor >= 6) { frozenFor = 0; sig.send({ type: 'request-restart' }); }
+
+  if (debug) {
+    const jb = vin.jitterBufferEmittedCount ? Math.round((vin.jitterBufferDelay / vin.jitterBufferEmittedCount) * 1000) : 0;
+    const ajb = ain?.jitterBufferEmittedCount ? Math.round((ain.jitterBufferDelay / ain.jitterBufferEmittedCount) * 1000) : 0;
+    const loss = vin.packetsLost && vin.packetsReceived ? ((vin.packetsLost / (vin.packetsLost + vin.packetsReceived)) * 100).toFixed(2) : '0.00';
+    info.hidden = false;
+    info.textContent =
+      `${vin.frameWidth}×${vin.frameHeight} @ ${Math.round(vin.framesPerSecond || 0)} fps\n` +
+      `buffer vídeo ${jb} ms · áudio ${ajb} ms\n` +
+      `perda ${loss}% · congelamentos ${vin.freezeCount ?? 0}`;
+  }
+}
+
+(async () => {
+  if (!key) { showWait('Falta ?key= na URL'); return; }
+  ice = await getIceConfig();
+  sig = new Signaling({
+    room, key, role: 'obs',
+    onStatus: (s) => {
+      if (s === 'unauthorized') showWait('Chave incorreta');
+      if (s === 'offline') showWait('Sem conexão com o servidor — tentando…');
+      if (s === 'replaced') showWait('Outro receptor assumiu esta sala');
+    },
+    onMessage: async (m) => {
+      if (m.type === 'joined' && !m.peerOnline) showWait('Aguardando câmera…');
+      if (m.type === 'offer') await onOffer(m.sdp, m.sid).catch((e) => console.error(e));
+      if (m.type === 'candidate') {
+        if (m.sid && m.sid !== currentSid) return;
+        if (pc?.remoteDescription) await pc.addIceCandidate(m.candidate).catch(() => {});
+        else pending.push(m.candidate);
+      }
+      if (m.type === 'peer-left') { closePeer(); v.srcObject = null; showWait('Câmera desconectada — aguardando…'); }
+    },
+  });
+  watchdog = setInterval(health, 1000);
+})();
+</script>
+</body>
+</html>

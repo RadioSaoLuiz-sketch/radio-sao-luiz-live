@@ -1,0 +1,16 @@
+{
+  "name": "radio-sao-luiz-live",
+  "version": "1.0.0",
+  "description": "Transmissão de vídeo de baixa latência (WebRTC) do celular para o OBS — Rádio São Luiz",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "express": "^4.21.2",
+    "ws": "^8.18.0"
+  }
+}
